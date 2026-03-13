@@ -1,0 +1,4 @@
+.a0proj/
+__pycache__/
+*.pyc
+*.pyo
