@@ -50,6 +50,51 @@ class MyFaiss(FAISS):
     def get_all_docs(self):
         return self.docstore._dict  # type: ignore
 
+    def similarity_search_with_score_by_vector(
+        self,
+        embedding: List[float],
+        k: int = 4,
+        filter: Any = None,
+        fetch_k: int = 20,
+        **kwargs: Any,
+    ) -> list:  # type: ignore[override]
+        """Override to gracefully skip ghost vectors not present in index_to_docstore_id.
+
+        Ghost vectors occur when the FAISS index has more entries than the docstore
+        mapping (e.g. after memory migrations or partial deletions). Without this
+        guard the parent class raises KeyError on the missing position integer.
+        """
+        vector = np.array([embedding], dtype=np.float32)
+        if self._normalize_L2:
+            faiss.normalize_L2(vector)
+        n_search = k if filter is None else fetch_k
+        scores, indices = self.index.search(vector, n_search)
+        docs = []
+        for j, i in enumerate(indices[0]):
+            if i == -1:
+                continue
+            if i not in self.index_to_docstore_id:
+                PrintStyle.warning(f"MyFaiss: ghost vector at position {i} — skipping (desync detected)")
+                continue
+            _id = self.index_to_docstore_id[i]
+            doc = self.docstore.search(_id)
+            if not isinstance(doc, Document):
+                continue
+            score = float(scores[0][j])
+            if filter is not None:
+                if callable(filter):
+                    if filter(doc.metadata):
+                        docs.append((doc, score))
+                elif isinstance(filter, dict):
+                    if all(doc.metadata.get(fk) == fv for fk, fv in filter.items()):
+                        docs.append((doc, score))
+            else:
+                docs.append((doc, score))
+        if filter is not None:
+            docs = docs[:k]
+        return docs
+
+
 
 class Memory:
 
@@ -435,7 +480,7 @@ class Memory:
                 result = simple_eval(condition, names=data)
                 return result
             except Exception as e:
-                PrintStyle.error(f"Error evaluating condition: {e}")
+                PrintStyle.error(f"Error evaluating filter condition: {e}")
                 return False
 
         return comparator
@@ -487,8 +532,13 @@ def abs_db_dir(memory_subdir: str) -> str:
     # patch for projects, this way we don't need to re-work the structure of memory subdirs
     if memory_subdir.startswith("projects/"):
         from helpers.projects import get_project_meta
-
-        return files.get_abs_path(get_project_meta(memory_subdir[9:]), "memory")
+        rest = memory_subdir[9:]
+        parts = rest.split("/", 1)
+        project_name = parts[0]
+        sub_path = parts[1] if len(parts) > 1 else None
+        if sub_path:
+            return files.get_abs_path(get_project_meta(project_name), "memory", sub_path)
+        return files.get_abs_path(get_project_meta(project_name), "memory")
     # standard subdirs
     return files.get_abs_path("usr/memory", memory_subdir)
 
@@ -497,10 +547,13 @@ def abs_knowledge_dir(knowledge_subdir: str, *sub_dirs: str) -> str:
     # patch for projects, this way we don't need to re-work the structure of knowledge subdirs
     if knowledge_subdir.startswith("projects/"):
         from helpers.projects import get_project_meta
-
-        return files.get_abs_path(
-            get_project_meta(knowledge_subdir[9:]), "knowledge", *sub_dirs
-        )
+        rest = knowledge_subdir[9:]
+        parts = rest.split("/", 1)
+        project_name = parts[0]
+        sub_path = parts[1] if len(parts) > 1 else None
+        if sub_path:
+            return files.get_abs_path(get_project_meta(project_name), "knowledge", sub_path, *sub_dirs)
+        return files.get_abs_path(get_project_meta(project_name), "knowledge", *sub_dirs)
     # standard subdirs
     if knowledge_subdir == "default":
         return files.get_abs_path("knowledge", *sub_dirs)
@@ -521,13 +574,18 @@ def get_agent_memory_subdir(agent: Agent) -> str:
         return "default"
     
     # Check if project isolation is enabled and we are in a project
+    # Extract agent subdir before project check (may be empty string)
+    agent_subdir = config.get("agent_memory_subdir", "") or ""
+
+    # Check if project isolation is enabled and we are in a project
     if config.get("project_memory_isolation", True):
         project_name = projects.get_context_project_name(agent.context)
         if project_name:
-            return "projects/" + project_name
+            base = "projects/" + project_name
+            return f"{base}/{agent_subdir}" if agent_subdir else base
 
     # Fallback to configured subdir or default
-    return config.get("agent_memory_subdir", "") or "default"
+    return agent_subdir or "default"
 
 
 def get_context_memory_subdir(context: AgentContext) -> str:
@@ -568,5 +626,8 @@ def get_knowledge_subdirs_by_memory_subdir(
     if memory_subdir.startswith("projects/"):
         from helpers.projects import get_project_meta
 
-        default.append(get_project_meta(memory_subdir[9:], "knowledge"))
+        rest = memory_subdir[9:]
+        parts = rest.split("/", 1)
+        project_name = parts[0]
+        default.append(get_project_meta(project_name, "knowledge"))
     return default
