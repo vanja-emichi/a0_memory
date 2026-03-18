@@ -50,51 +50,6 @@ class MyFaiss(FAISS):
     def get_all_docs(self):
         return self.docstore._dict  # type: ignore
 
-    def similarity_search_with_score_by_vector(
-        self,
-        embedding: List[float],
-        k: int = 4,
-        filter: Any = None,
-        fetch_k: int = 20,
-        **kwargs: Any,
-    ) -> list:  # type: ignore[override]
-        """Override to gracefully skip ghost vectors not present in index_to_docstore_id.
-
-        Ghost vectors occur when the FAISS index has more entries than the docstore
-        mapping (e.g. after memory migrations or partial deletions). Without this
-        guard the parent class raises KeyError on the missing position integer.
-        """
-        vector = np.array([embedding], dtype=np.float32)
-        if self._normalize_L2:
-            faiss.normalize_L2(vector)
-        n_search = k if filter is None else fetch_k
-        scores, indices = self.index.search(vector, n_search)
-        docs = []
-        for j, i in enumerate(indices[0]):
-            if i == -1:
-                continue
-            if i not in self.index_to_docstore_id:
-                PrintStyle.warning(f"MyFaiss: ghost vector at position {i} — skipping (desync detected)")
-                continue
-            _id = self.index_to_docstore_id[i]
-            doc = self.docstore.search(_id)
-            if not isinstance(doc, Document):
-                continue
-            score = float(scores[0][j])
-            if filter is not None:
-                if callable(filter):
-                    if filter(doc.metadata):
-                        docs.append((doc, score))
-                elif isinstance(filter, dict):
-                    if all(doc.metadata.get(fk) == fv for fk, fv in filter.items()):
-                        docs.append((doc, score))
-            else:
-                docs.append((doc, score))
-        if filter is not None:
-            docs = docs[:k]
-        return docs
-
-
 
 class Memory:
 
@@ -102,6 +57,7 @@ class Memory:
         MAIN = "main"
         FRAGMENTS = "fragments"
         SOLUTIONS = "solutions"
+        INSTRUMENTS = "instruments"
 
     index: dict[str, "MyFaiss"] = {}
 
@@ -367,6 +323,55 @@ class Memory:
                     recursive=True,
                 )
 
+        # NOTE: Skills indexing into Memory is intentionally disabled for now.
+        # If we decide to replace instruments with skills in memory, re-enable this block:
+        # skills_dirs = ["custom", "default"]
+        # for skills_subdir in skills_dirs:
+        #     skills_path = files.get_abs_path("usr", "skills", skills_subdir)
+        #     index = knowledge_import.load_knowledge(
+        #         log_item,
+        #         skills_path,
+        #         index,
+        #         {"area": Memory.Area.SKILLS.value},
+        #         filename_pattern="**/SKILL.md",
+        #     )
+        #
+        # try:
+        #     from helpers.skills_import import get_project_skills_folder
+        #     from helpers import projects as projects_helper
+        #     for proj in projects_helper.get_active_projects_list():
+        #         proj_skills_path = str(get_project_skills_folder(proj["name"]))
+        #         if os.path.isdir(proj_skills_path):
+        #             index = knowledge_import.load_knowledge(
+        #                 log_item,
+        #                 proj_skills_path,
+        #                 index,
+        #                 {"area": Memory.Area.SKILLS.value},
+        #                 filename_pattern="**/SKILL.md",
+        #             )
+        # except Exception:
+        #     pass
+
+        # load instruments descriptions
+        index = knowledge_import.load_knowledge(
+            log_item,
+            files.get_abs_path("instruments"),
+            index,
+            {"area": Memory.Area.INSTRUMENTS.value},
+            filename_pattern="**/*.md",
+            recursive=True,
+        )
+
+        # load custom instruments descriptions
+        index = knowledge_import.load_knowledge(
+            log_item,
+            files.get_abs_path("usr/instruments"),
+            index,
+            {"area": Memory.Area.INSTRUMENTS.value},
+            filename_pattern="**/*.md",
+            recursive=True,
+        )
+
         return index
 
     def get_document_by_id(self, id: str) -> Document | None:
@@ -384,6 +389,40 @@ class Memory:
             score_threshold=threshold,
             filter=comparator,
         )
+
+    async def search_similarity_threshold_with_scores(
+        self, query: str, limit: int, threshold: float, filter: str = ""
+    ) -> list[tuple["Document", float]]:
+        """Search for similar documents and return them WITH their cosine similarity scores.
+
+        Uses asimilarity_search_with_relevance_scores which returns relevance scores
+        in the range [0, 1] where 1 = identical (converted from raw FAISS distances
+        via the relevance_score_fn).
+
+        Args:
+            query: Text to search for.
+            limit: Maximum number of results to return.
+            threshold: Minimum relevance score (0-1) to include in results.
+            filter: Optional metadata filter expression.
+
+        Returns:
+            List of (Document, score) tuples sorted by score descending.
+        """
+        comparator = Memory._get_comparator(filter) if filter else None
+
+        docs_and_scores = await self.db.asimilarity_search_with_relevance_scores(
+            query,
+            k=limit,
+            score_threshold=threshold,
+            filter=comparator,
+            fetch_k=limit * 4,  # Fetch more candidates for better filtering
+        )
+
+        # Sort by score descending (highest similarity first)
+        docs_and_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # Limit results
+        return docs_and_scores[:limit]
 
     async def delete_documents_by_query(
         self, query: str, threshold: float, filter: str = ""
@@ -480,7 +519,7 @@ class Memory:
                 result = simple_eval(condition, names=data)
                 return result
             except Exception as e:
-                PrintStyle.error(f"Error evaluating filter condition: {e}")
+                PrintStyle.error(f"Error evaluating condition: {e}")
                 return False
 
         return comparator
@@ -532,12 +571,13 @@ def abs_db_dir(memory_subdir: str) -> str:
     # patch for projects, this way we don't need to re-work the structure of memory subdirs
     if memory_subdir.startswith("projects/"):
         from helpers.projects import get_project_meta
-        rest = memory_subdir[9:]
-        parts = rest.split("/", 1)
+        # Could be "projects/project_name" or "projects/project_name/agent_subdir"
+        remainder = memory_subdir[9:]  # strip "projects/"
+        parts = remainder.split("/", 1)
         project_name = parts[0]
-        sub_path = parts[1] if len(parts) > 1 else None
-        if sub_path:
-            return files.get_abs_path(get_project_meta(project_name), "memory", sub_path)
+        if len(parts) > 1:
+            # Has agent subdir: .a0proj/memory/{agent_subdir}/
+            return files.get_abs_path(get_project_meta(project_name), "memory", parts[1])
         return files.get_abs_path(get_project_meta(project_name), "memory")
     # standard subdirs
     return files.get_abs_path("usr/memory", memory_subdir)
@@ -547,13 +587,10 @@ def abs_knowledge_dir(knowledge_subdir: str, *sub_dirs: str) -> str:
     # patch for projects, this way we don't need to re-work the structure of knowledge subdirs
     if knowledge_subdir.startswith("projects/"):
         from helpers.projects import get_project_meta
-        rest = knowledge_subdir[9:]
-        parts = rest.split("/", 1)
-        project_name = parts[0]
-        sub_path = parts[1] if len(parts) > 1 else None
-        if sub_path:
-            return files.get_abs_path(get_project_meta(project_name), "knowledge", sub_path, *sub_dirs)
-        return files.get_abs_path(get_project_meta(project_name), "knowledge", *sub_dirs)
+
+        return files.get_abs_path(
+            get_project_meta(knowledge_subdir[9:]), "knowledge", *sub_dirs
+        )
     # standard subdirs
     if knowledge_subdir == "default":
         return files.get_abs_path("knowledge", *sub_dirs)
@@ -568,30 +605,39 @@ def get_memory_subdir_abs(agent: Agent) -> str:
 
 
 def get_agent_memory_subdir(agent: Agent) -> str:
-    config = plugins.get_plugin_config("_memory", agent)
+    # Read per-agent plugin config
+    config = plugins.get_plugin_config("a0_memory", agent)
 
-    if not config:
-        return "default"
-    
-    # Check if project isolation is enabled and we are in a project
-    # Extract agent subdir before project check (may be empty string)
-    agent_subdir = config.get("agent_memory_subdir", "") or ""
-
-    # Check if project isolation is enabled and we are in a project
-    if config.get("project_memory_isolation", True):
-        project_name = projects.get_context_project_name(agent.context)
+    # Check if we are in a project
+    try:
+        from helpers.projects import get_context_project_name
+        project_name = get_context_project_name(agent.context)
         if project_name:
-            base = "projects/" + project_name
-            return f"{base}/{agent_subdir}" if agent_subdir else base
+            # Combine project + per-agent subdir if configured
+            agent_subdir = (config.get("agent_memory_subdir", "") or "") if config else ""
+            if agent_subdir:
+                return f"projects/{project_name}/{agent_subdir}"
+            return f"projects/{project_name}"
+    except Exception:
+        pass
 
-    # Fallback to configured subdir or default
-    return agent_subdir or "default"
+    # No project — use agent subdir or default
+    if config:
+        return config.get("agent_memory_subdir", "") or "default"
+    return getattr(agent.context.config, "memory_subdir", None) or "default"
 
 
 def get_context_memory_subdir(context: AgentContext) -> str:
-    agent = context.get_agent()
-    return get_agent_memory_subdir(agent)
-
+    # if project is active, use project memory subdir (context-only, no agent config)
+    try:
+        from helpers.projects import get_context_project_name
+        project_name = get_context_project_name(context)
+        if project_name:
+            return "projects/" + project_name
+    except Exception:
+        pass
+    # no project, regular memory subdir
+    return getattr(context.config, "memory_subdir", None) or "default"
 
 def get_existing_memory_subdirs() -> list[str]:
     try:
@@ -625,9 +671,9 @@ def get_knowledge_subdirs_by_memory_subdir(
 ) -> list[str]:
     if memory_subdir.startswith("projects/"):
         from helpers.projects import get_project_meta
-
-        rest = memory_subdir[9:]
-        parts = rest.split("/", 1)
-        project_name = parts[0]
+        # Extract only project_name — memory_subdir may be 2-part
+        # ("projects/project_name") or 3-part
+        # ("projects/project_name/agent_subdir")
+        project_name = memory_subdir[9:].split("/", 1)[0]
         default.append(get_project_meta(project_name, "knowledge"))
     return default

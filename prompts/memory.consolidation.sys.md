@@ -15,10 +15,10 @@ Analyze a new memory alongside existing similar memories and determine whether t
 ## Consolidation Analysis Guidelines
 
 ### 0. Similarity Score Awareness
-- Each similar memory has been scored for similarity to the new memory
-- **High similarity scores** (>0.9) indicate very similar content suitable for replacement
-- **Moderate similarity scores** (0.7-0.9) suggest related but distinct content - use caution with REPLACE
-- **Lower similarity scores** (<0.7) indicate topically related but different content - avoid REPLACE
+- Each similar memory has been scored for cosine similarity to the new memory
+- **High similarity** (>0.8) indicates very similar content — suitable for REPLACE or MERGE
+- **Moderate similarity** (0.6-0.8) suggests related content — suitable for MERGE or UPDATE
+- **Lower similarity** (<0.6) indicates loosely related content — prefer KEEP_SEPARATE
 
 ### 1. Temporal Intelligence
 - **Newer information** generally supersedes older information
@@ -30,6 +30,7 @@ Analyze a new memory alongside existing similar memories and determine whether t
 - **Contradictory information** requires careful analysis of which is more accurate/current
 - **Duplicate content** should be consolidated to eliminate redundancy
 - **Distinct but related topics** may be better kept separate
+- **Factual corrections** — When new memory corrects a specific value, number, or fact from an existing memory, the old memory MUST be updated or replaced. Do not keep the incorrect version alongside the corrected one
 
 ### 3. Quality Assessment
 - **More detailed/complete** information should be preserved
@@ -96,13 +97,17 @@ Provide your analysis as a JSON object with this exact structure:
 **Action**: replace → Update with new endpoint, note the change in historical_notes
 
 **REPLACE Criteria**: Use replace when:
-- **High similarity score** (>0.9) indicates very similar content
-- New information directly contradicts existing information
+- New information directly contradicts or supersedes existing information
 - Version updates make previous versions obsolete
 - Bug fixes or corrections supersede previous information
 - Official changes override previous statements
+- The memories cover the same topic and the new version is more complete
+- **CRITICAL: Factual corrections** — If the new memory corrects a specific value, number, setting, or fact in the existing memory (e.g., a threshold was 0.50 not 0.60), ALWAYS use REPLACE or UPDATE to fix the incorrect value, regardless of similarity score. Never use KEEP_SEPARATE when one memory contains a factual error that the other corrects
 
-**REPLACE Safety**: Only replace memories with high similarity scores. For moderate similarity, prefer MERGE or KEEP_SEPARATE to preserve distinct information.
+### Scenario 2b: Factual Correction
+**New**: "Memory recall similarity threshold was changed to 0.50, not 0.60 as previously recorded"
+**Existing**: "Lowered recall threshold from 0.85 to 0.60 which improved recall by 158%"
+**Action**: replace → Correct the factual error (0.60 → 0.50), preserve all other information. Even at moderate similarity (0.6-0.9), factual corrections MUST use REPLACE or UPDATE to eliminate the incorrect value.
 
 ### Scenario 3: Keep Separate for Different Contexts
 **New**: "Python async/await syntax for handling concurrent operations"

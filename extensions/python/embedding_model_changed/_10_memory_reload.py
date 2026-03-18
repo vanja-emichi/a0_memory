@@ -1,7 +1,7 @@
 from helpers.extension import Extension
 
 # Direct import - this extension lives inside the memory plugin
-from plugins._memory.helpers.memory import reload as memory_reload
+from plugins.a0_memory.helpers.memory import reload as memory_reload
 
 
 class MemoryReload(Extension):

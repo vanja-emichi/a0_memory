@@ -1,39 +1,26 @@
 import asyncio
 from helpers.extension import Extension
+from plugins.a0_memory.helpers.memory import Memory
 from agent import LoopData
-from helpers import dirty_json, errors, log, plugins
-
-# Direct import - this extension lives inside the memory plugin
-from plugins._memory.helpers.memory import Memory
-from plugins._memory.tools.memory_load import DEFAULT_THRESHOLD as DEFAULT_MEMORY_THRESHOLD
+from plugins.a0_memory.tools.memory_load import DEFAULT_THRESHOLD as DEFAULT_MEMORY_THRESHOLD
+from helpers import dirty_json, errors, log, plugins, settings
+from helpers.dirty_json import DirtyJson
+from helpers.print_style import PrintStyle
 
 
 DATA_NAME_TASK = "_recall_memories_task"
 DATA_NAME_ITER = "_recall_memories_iter"
-SEARCH_TIMEOUT = 30
 
 
 class RecallMemories(Extension):
 
-    # INTERVAL = 3
-    # HISTORY = 10000
-    # MEMORIES_MAX_SEARCH = 12
-    # SOLUTIONS_MAX_SEARCH = 8
-    # MEMORIES_MAX_RESULT = 5
-    # SOLUTIONS_MAX_RESULT = 3
-    # THRESHOLD = DEFAULT_MEMORY_THRESHOLD
-
     async def execute(self, loop_data: LoopData = LoopData(), **kwargs):
-        if not self.agent:
-            return
 
-        set = plugins.get_plugin_config("_memory", self.agent)
-        if not set:
-            return None
+        set = plugins.get_plugin_config("a0_memory", self.agent)
 
         # turned off in settings?
         if not set["memory_recall_enabled"]:
-            return None
+            return
 
         # every X iterations (or the first one) recall memories
         if loop_data.iteration % set["memory_recall_interval"] == 0:
@@ -45,10 +32,7 @@ class RecallMemories(Extension):
             )
 
             task = asyncio.create_task(
-                asyncio.wait_for(
-                    self.search_memories(loop_data=loop_data, log_item=log_item, **kwargs),
-                    timeout=SEARCH_TIMEOUT,
-                )
+                self.search_memories(loop_data=loop_data, log_item=log_item, **kwargs)
             )
         else:
             task = None
@@ -58,8 +42,6 @@ class RecallMemories(Extension):
         self.agent.set_data(DATA_NAME_ITER, loop_data.iteration)
 
     async def search_memories(self, log_item: log.LogItem, loop_data: LoopData, **kwargs):
-        if not self.agent:
-            return
 
         # cleanup
         extras = loop_data.extras_persistent
@@ -69,17 +51,10 @@ class RecallMemories(Extension):
             del extras["solutions"]
 
 
-        set = plugins.get_plugin_config("_memory", self.agent)
-        if not set:
-            return None
-        # try:
+        set = plugins.get_plugin_config("a0_memory", self.agent)
 
         # get system message and chat history for util llm
         system = self.agent.read_prompt("memory.memories_query.sys.md")
-
-        # # log query streamed by LLM
-        # async def log_callback(content):
-        #     log_item.stream(query=content)
 
         # call util llm to summarize conversation
         user_instruction = (
@@ -97,7 +72,6 @@ class RecallMemories(Extension):
                 query = await self.agent.call_utility_model(
                     system=system,
                     message=message,
-                    # callback=log_callback,
                 )
                 query = query.strip()
                 log_item.update(query=query) # no need for streaming here
@@ -114,7 +88,7 @@ class RecallMemories(Extension):
                     heading="Failed to generate memory query",
                 )
                 return
-        
+
         # otherwise use the message and history as query
         else:
             query = user_instruction + "\n\n" + history
@@ -129,21 +103,67 @@ class RecallMemories(Extension):
         # get memory database
         db = await Memory.get(self.agent)
 
-        # search for general memories and fragments
-        memories = await db.search_similarity_threshold(
-            query=query,
-            limit=set["memory_recall_memories_max_search"],
-            threshold=set["memory_recall_similarity_threshold"],
-            filter=f"area == '{Memory.Area.MAIN.value}' or area == '{Memory.Area.FRAGMENTS.value}'",  # exclude solutions
+        # === MULTI-QUERY: Extract additional keywords for broader recall ===
+        extra_keywords = await self._extract_recall_keywords(
+            user_instruction=user_instruction,
+            history=history,
+            log_item=log_item,
         )
 
-        # search for solutions
-        solutions = await db.search_similarity_threshold(
-            query=query,
-            limit=set["memory_recall_solutions_max_search"],
-            threshold=set["memory_recall_similarity_threshold"],
-            filter=f"area == '{Memory.Area.SOLUTIONS.value}'",  # exclude solutions
-        )
+        # Build list of all queries: main query + extracted keywords
+        all_queries = [query] + extra_keywords
+        if extra_keywords:
+            PrintStyle.standard(f"Multi-query recall: main query + {len(extra_keywords)} keywords: {extra_keywords}")
+            log_item.update(keywords=str(extra_keywords))
+
+        # === Search memories using all queries ===
+        all_memories = []
+        all_solutions = []
+
+        mem_filter = f"area == '{Memory.Area.MAIN.value}' or area == '{Memory.Area.FRAGMENTS.value}'"
+        sol_filter = f"area == '{Memory.Area.SOLUTIONS.value}'"
+        threshold = set["memory_recall_similarity_threshold"]
+
+        for i, q in enumerate(all_queries):
+            if not q or len(q.strip()) <= 2:
+                continue
+
+            # For keyword queries, use proportionally smaller limits
+            if i == 0:
+                # Main query gets full limits
+                mem_limit = set["memory_recall_memories_max_search"]
+                sol_limit = set["memory_recall_solutions_max_search"]
+            else:
+                # Keyword queries get proportional share of the limit
+                kw_count = max(1, len(extra_keywords))
+                mem_limit = max(3, set["memory_recall_memories_max_search"] // kw_count)
+                sol_limit = max(2, set["memory_recall_solutions_max_search"] // kw_count)
+
+            mems = await db.search_similarity_threshold(
+                query=q.strip(),
+                limit=mem_limit,
+                threshold=threshold,
+                filter=mem_filter,
+            )
+            all_memories.extend(mems)
+
+            sols = await db.search_similarity_threshold(
+                query=q.strip(),
+                limit=sol_limit,
+                threshold=threshold,
+                filter=sol_filter,
+            )
+            all_solutions.extend(sols)
+
+        # === Deduplicate by document metadata id, fallback to page_content ===
+        memories = self._deduplicate_docs(all_memories)
+        solutions = self._deduplicate_docs(all_solutions)
+
+        if extra_keywords:
+            PrintStyle.standard(
+                f"Multi-query results: {len(all_memories)} raw -> {len(memories)} unique memories, "
+                f"{len(all_solutions)} raw -> {len(solutions)} unique solutions"
+            )
 
         if not memories and not solutions:
             log_item.update(
@@ -227,3 +247,69 @@ class RecallMemories(Extension):
             extras["solutions"] = self.agent.parse_prompt(
                 "agent.system.solutions.md", solutions=solutions_txt
             )
+
+    async def _extract_recall_keywords(
+        self,
+        user_instruction: str,
+        history: str,
+        log_item: log.LogItem,
+    ) -> list[str]:
+        """Extract 2-4 search keywords from user message + context using the
+        same keyword_extraction prompt that the consolidation pipeline uses.
+        Falls back to empty list on any error (single-query behavior)."""
+        try:
+            system_prompt = self.agent.read_prompt(
+                "memory.keyword_extraction.sys.md",
+            )
+            # The keyword_extraction.msg.md expects {{memory_content}}
+            # We pass the user message + recent history as the "memory content"
+            content_for_extraction = user_instruction
+            if history:
+                # Include some history for context, but keep it short
+                content_for_extraction += "\n\nRecent context:\n" + history[:500]
+
+            message_prompt = self.agent.read_prompt(
+                "memory.keyword_extraction.msg.md",
+                memory_content=content_for_extraction,
+            )
+
+            keywords_response = await self.agent.call_utility_model(
+                system=system_prompt,
+                message=message_prompt,
+            )
+
+            # Parse the response - expect JSON array of strings
+            keywords_json = DirtyJson.parse_string(keywords_response.strip())
+
+            if isinstance(keywords_json, list):
+                keywords = [str(k).strip() for k in keywords_json if k and str(k).strip()]
+                # Cap at 4 keywords to avoid excessive searches
+                return keywords[:4]
+            elif isinstance(keywords_json, str) and keywords_json.strip():
+                return [keywords_json.strip()]
+            else:
+                return []
+
+        except Exception as e:
+            PrintStyle.warning(f"Keyword extraction for recall failed (falling back to single query): {e}")
+            return []
+
+    @staticmethod
+    def _deduplicate_docs(docs: list) -> list:
+        """Deduplicate documents by metadata id, with page_content fallback."""
+        seen_ids = set()
+        unique = []
+        for doc in docs:
+            # Primary: use document metadata id
+            doc_id = doc.metadata.get("id") if hasattr(doc, "metadata") else None
+            if doc_id:
+                if doc_id not in seen_ids:
+                    seen_ids.add(doc_id)
+                    unique.append(doc)
+            else:
+                # Fallback: use page_content hash for docs without id
+                content_key = "_content_" + str(hash(doc.page_content))
+                if content_key not in seen_ids:
+                    seen_ids.add(content_key)
+                    unique.append(doc)
+        return unique

@@ -14,15 +14,25 @@
 - Only focus on facts and events, ignore common conversation patterns, greeting etc.
 - Ignore AI thoughts and behavior
 - Focus on USER MESSAGE if provided, use HISTORY for context
+- Keep queries to 3-6 words - shorter is better
+- Avoid question words (what, how, why) - memories are statements not questions
+- Avoid meta-verbs (tell, explain, describe, remind) - they dilute similarity
+- Focus on nouns, names, and technical terms
 
 # Ignored:
 For the following topics, no query is needed and return a single dash (-):
 - Greeting
 
-# Example
-```json
+# Examples
+```
 USER: "Write a song about my dog"
 AI: "user's dog"
 USER: "following the results of the biology project, summarize..."
 AI: "biology project results"
+USER: "How did we fix that database timeout issue?"
+AI: "database timeout fix"
+USER: "What's the login for the Loloi website?"
+AI: "loloi website login credentials"
+USER: "Can you remind me about the browser agent patches?"
+AI: "browser agent patches"
 ```

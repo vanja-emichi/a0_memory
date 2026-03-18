@@ -7,8 +7,8 @@ from helpers.log import LogItem
 from helpers.defer import DeferredTask, THREAD_BACKGROUND
 
 # Direct import - this extension lives inside the memory plugin
-from plugins._memory.helpers.memory import Memory
-from plugins._memory.tools.memory_load import DEFAULT_THRESHOLD as DEFAULT_MEMORY_THRESHOLD
+from plugins.a0_memory.helpers.memory import Memory
+from plugins.a0_memory.tools.memory_load import DEFAULT_THRESHOLD as DEFAULT_MEMORY_THRESHOLD
 
 
 class MemorizeMemories(Extension):
@@ -18,7 +18,7 @@ class MemorizeMemories(Extension):
         if not self.agent:
             return
 
-        set = plugins.get_plugin_config("_memory", self.agent)
+        set = plugins.get_plugin_config("a0_memory", self.agent)
         if not set:
             return None
 
@@ -41,7 +41,7 @@ class MemorizeMemories(Extension):
             return
 
         try:
-            set = plugins.get_plugin_config("_memory", self.agent)
+            set = plugins.get_plugin_config("a0_memory", self.agent)
             if not set:
                 return None
 
@@ -117,7 +117,7 @@ class MemorizeMemories(Extension):
                     
                     try:
                         # Use intelligent consolidation system
-                        from plugins._memory.helpers.memory_consolidation import create_memory_consolidator
+                        from plugins.a0_memory.helpers.memory_consolidation import create_memory_consolidator
                         consolidator = create_memory_consolidator(
                             self.agent,
                             similarity_threshold=DEFAULT_MEMORY_THRESHOLD,  # More permissive for discovery

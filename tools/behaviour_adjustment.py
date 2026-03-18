@@ -2,7 +2,7 @@ from helpers import files
 from helpers.tool import Tool, Response
 from agent import Agent
 from helpers.log import LogItem
-from plugins._memory.helpers import memory
+from plugins.a0_memory.helpers import memory
 
 
 class UpdateBehaviour(Tool):

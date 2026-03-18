@@ -7,12 +7,25 @@
 - The response format is a plain text string containing the query
 - No other text, no formatting
 
-# Example
-```json
+# Rules
+- Focus on the technical problem being solved
+- Keep queries to 3-6 words - shorter is better
+- Avoid question words (what, how, why) - solutions are statements not questions
+- Avoid meta-verbs (tell, explain, describe) - they dilute similarity
+- Focus on nouns, tool names, and technical terms
+
+# Examples
+```
 USER: "I want to download a video from YouTube. A video URL is specified by the user."
 AI: "download youtube video"
 USER: "Now compress all files in that folder"
-AI: "compress files in folder"
+AI: "compress files folder zip"
+USER: "How do I set up OAuth for the API?"
+AI: "OAuth API setup"
+USER: "The browser keeps timing out on click actions"
+AI: "browser click timeout"
+USER: "Fix the database connection pool exhaustion"
+AI: "database connection pool fix"
 ```
 
 # HISTORY:

@@ -1,5 +1,5 @@
 from helpers.tool import Tool, Response
-from plugins._memory.helpers.memory import Memory
+from plugins.a0_memory.helpers.memory import Memory
 
 from tools.memory_load import DEFAULT_THRESHOLD
 

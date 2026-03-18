@@ -3,7 +3,7 @@ from agent import Agent, LoopData
 from helpers import files
 
 # Direct import - this extension lives inside the memory plugin
-from plugins._memory.helpers import memory
+from plugins.a0_memory.helpers import memory
 
 
 class BehaviourPrompt(Extension):

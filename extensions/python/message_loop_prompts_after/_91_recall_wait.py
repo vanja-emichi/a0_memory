@@ -1,6 +1,6 @@
 from helpers.extension import Extension
 from agent import LoopData
-from plugins._memory.extensions.python.message_loop_prompts_after._50_recall_memories import DATA_NAME_TASK as DATA_NAME_TASK_MEMORIES, DATA_NAME_ITER as DATA_NAME_ITER_MEMORIES
+from plugins.a0_memory.extensions.python.message_loop_prompts_after._50_recall_memories import DATA_NAME_TASK as DATA_NAME_TASK_MEMORIES, DATA_NAME_ITER as DATA_NAME_ITER_MEMORIES
 from helpers import plugins
 
 class RecallWait(Extension):
@@ -9,7 +9,7 @@ class RecallWait(Extension):
         if not self.agent:
             return
 
-        set = plugins.get_plugin_config("_memory", self.agent)
+        set = plugins.get_plugin_config("a0_memory", self.agent)
         if not set:
             return None
 
