@@ -254,44 +254,38 @@ class RecallMemories(Extension):
         history: str,
         log_item: log.LogItem,
     ) -> list[str]:
-        """Extract 2-4 search keywords from user message + context using the
-        same keyword_extraction prompt that the consolidation pipeline uses.
-        Falls back to empty list on any error (single-query behavior)."""
+        """Extract search keywords using fast pure-Python NLP.
+        No LLM call needed - runs in microseconds instead of seconds."""
+        STOPWORDS = {
+            "a","an","the","and","or","but","in","on","at","to","for","of",
+            "with","by","from","up","about","into","is","are","was","were",
+            "be","been","have","has","had","do","does","did","will","would",
+            "could","should","may","might","can","i","you","he","she","it",
+            "we","they","what","which","who","this","that","these","those",
+            "not","no","so","if","then","than","just","also","how","when",
+            "where","why","please","help","need","want","get","use","make",
+            "let","know","see","look","like","go","come","me","my","your",
+            "its","our","their","there","here","now","more","some","any",
+            "all","one","two","give","tell","show","yes","okay","thing",
+        }
         try:
-            system_prompt = self.agent.read_prompt(
-                "memory.keyword_extraction.sys.md",
-            )
-            # The keyword_extraction.msg.md expects {{memory_content}}
-            # We pass the user message + recent history as the "memory content"
-            content_for_extraction = user_instruction
-            if history:
-                # Include some history for context, but keep it short
-                content_for_extraction += "\n\nRecent context:\n" + history[:500]
-
-            message_prompt = self.agent.read_prompt(
-                "memory.keyword_extraction.msg.md",
-                memory_content=content_for_extraction,
-            )
-
-            keywords_response = await self.agent.call_utility_model(
-                system=system_prompt,
-                message=message_prompt,
-            )
-
-            # Parse the response - expect JSON array of strings
-            keywords_json = DirtyJson.parse_string(keywords_response.strip())
-
-            if isinstance(keywords_json, list):
-                keywords = [str(k).strip() for k in keywords_json if k and str(k).strip()]
-                # Cap at 4 keywords to avoid excessive searches
-                return keywords[:4]
-            elif isinstance(keywords_json, str) and keywords_json.strip():
-                return [keywords_json.strip()]
-            else:
+            text = user_instruction
+            if not text or len(text.strip()) < 3:
                 return []
-
+            tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_.\-]{2,}", text)
+            words = [
+                t.lower() for t in tokens
+                if t.lower() not in STOPWORDS and len(t) > 3
+            ]
+            seen = set()
+            unique = []
+            for w in words:
+                if w not in seen:
+                    seen.add(w)
+                    unique.append(w)
+            return unique[:4]
         except Exception as e:
-            PrintStyle.warning(f"Keyword extraction for recall failed (falling back to single query): {e}")
+            PrintStyle.warning(f"Keyword extraction failed: {e}")
             return []
 
     @staticmethod
