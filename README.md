@@ -172,12 +172,3 @@ Configure per-project or per-agent from the Agent Zero Settings > Memory tab.
 - **FAISS integrity**: Index files are SHA-256 verified on every load. Tampered indexes are rejected and rebuilt. Existing installations without sidecars are accepted on first load (fail-open); the sidecar is written on the next save.
 - **Filter validation**: All `memory_load` filter strings are validated against a strict character allowlist before evaluation. Injection attempts are rejected and logged.
 
----
-
-## Why the ValueError Happened
-
-> This section explains an issue encountered during development — useful context for contributors.
-
-When writing large markdown files through the agent framework's `text_editor:write` tool, the entire agent response including the file content is transmitted as a JSON envelope. Markdown content containing backticks, unescaped quotes, and backslash sequences breaks JSON parsing — the framework raises `ValueError: Tool request must be a dictionary` because it can no longer deserialise the response.
-
-**Fix:** Always write large files via `code_execution_tool` (Python or heredoc) which transmits content as a string literal inside a Python `open().write()` call, bypassing the JSON escaping problem entirely.
