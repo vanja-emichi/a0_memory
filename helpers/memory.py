@@ -18,7 +18,7 @@ from langchain_community.vectorstores.utils import (
 )
 from langchain_core.embeddings import Embeddings
 
-import os, json
+import os, json, hashlib, re
 
 import numpy as np
 
@@ -179,14 +179,19 @@ class Memory:
 
         # if db folder exists and is not empty:
         if os.path.exists(db_dir) and files.exists(db_dir, "index.faiss"):
-            db = MyFaiss.load_local(
-                folder_path=db_dir,
-                embeddings=embedder,
-                allow_dangerous_deserialization=True,
-                distance_strategy=DistanceStrategy.COSINE,
-                # normalize_L2=True,
-                relevance_score_fn=Memory._cosine_normalizer,
-            )  # type: ignore
+            if not Memory._verify_index_hash(db_dir):
+                PrintStyle(font_color="yellow").print(
+                    f"FAISS index hash mismatch in '{db_dir}' — index will be rebuilt."
+                )
+            else:
+                db = MyFaiss.load_local(
+                    folder_path=db_dir,
+                    embeddings=embedder,
+                    allow_dangerous_deserialization=True,
+                    distance_strategy=DistanceStrategy.COSINE,
+                    # normalize_L2=True,
+                    relevance_score_fn=Memory._cosine_normalizer,
+                )  # type: ignore
 
             # if there is a mismatch in embeddings used, re-index the whole DB
             emb_ok = False
@@ -516,12 +521,61 @@ class Memory:
     def _save_db_file(db: MyFaiss, memory_subdir: str):
         abs_dir = abs_db_dir(memory_subdir)
         db.save_local(folder_path=abs_dir)
+        Memory._write_index_hash(abs_dir)
+
+    @staticmethod
+    def _write_index_hash(abs_dir: str) -> None:
+        """Write SHA256 of index.faiss to index.faiss.sha256 for integrity verification."""
+        faiss_path = os.path.join(abs_dir, "index.faiss")
+        hash_path = os.path.join(abs_dir, "index.faiss.sha256")
+        try:
+            h = hashlib.sha256()
+            with open(faiss_path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            with open(hash_path, "w") as f:
+                f.write(h.hexdigest())
+        except Exception as e:
+            PrintStyle(font_color="yellow").print(f"Warning: could not write FAISS hash: {e}")
+
+    @staticmethod
+    def _verify_index_hash(abs_dir: str) -> bool:
+        """Verify SHA256 of index.faiss against stored sidecar.
+        Returns True if hash matches or no sidecar exists (legacy install — fail-open)."""
+        faiss_path = os.path.join(abs_dir, "index.faiss")
+        hash_path = os.path.join(abs_dir, "index.faiss.sha256")
+        if not os.path.exists(hash_path):
+            # No sidecar yet (pre-existing install) — trust on first load, hash on next write
+            return True
+        try:
+            with open(hash_path, "r") as f:
+                stored = f.read().strip()
+            h = hashlib.sha256()
+            with open(faiss_path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            return h.hexdigest() == stored
+        except Exception as e:
+            PrintStyle(font_color="yellow").print(f"Warning: FAISS hash check failed: {e}")
+            return True  # Fail-open: don't block startup on hash read errors
 
     @staticmethod
     def _get_comparator(condition: str):
+        # Security: validate filter string against a strict allowlist before eval.
+        # Permits: alphanumeric, space, tab, _ - . ' " = < > ! ( ) [ ] , : + keywords.
+        # Rejects newlines, shell meta-chars, imports, calls, or encoded payloads.
+        _FILTER_SAFE = re.compile(
+            r"^[a-zA-Z0-9_\-\.\ \t'\"=<>!()\[\],:\+]+$"
+        )
+        if len(condition) > 512 or not _FILTER_SAFE.match(condition):
+            PrintStyle.error(
+                f"Memory filter rejected (unsafe characters or too long): {condition!r}"
+            )
+            return lambda data: False
+
         def comparator(data: dict[str, Any]):
             try:
-                result = simple_eval(condition, names=data)
+                result = simple_eval(condition, names=data, functions={})
                 return result
             except Exception as e:
                 PrintStyle.error(f"Error evaluating condition: {e}")
