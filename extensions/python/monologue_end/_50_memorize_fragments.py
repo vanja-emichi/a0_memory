@@ -50,6 +50,12 @@ class MemorizeMemories(Extension):
             # get system message and chat history for util llm
             system = self.agent.read_prompt("memory.memories_sum.sys.md")
             msgs_text = self.agent.concat_messages(self.agent.history)
+            # Truncate to last 80,000 chars (~20K tokens) to avoid context length overflow.
+            # Memorize fragments only needs recent context — full history causes BadRequestError
+            # when input tokens + max_tokens exceeds model's context window.
+            MAX_MSGS_CHARS = 80000
+            if len(msgs_text) > MAX_MSGS_CHARS:
+                msgs_text = msgs_text[-MAX_MSGS_CHARS:]
 
             # # log query streamed by LLM
             # async def log_callback(content):
